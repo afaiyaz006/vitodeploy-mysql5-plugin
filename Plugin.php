@@ -25,13 +25,6 @@ class Plugin extends AbstractPlugin
             ->versions([
                 '5.7',
             ])
-            ->configPaths([
-                [
-                    'name' => 'my.cnf',
-                    'path' => '/etc/mysql/my.cnf',
-                    'sudo' => true,
-                ],
-            ])
             ->register();
     }
 }

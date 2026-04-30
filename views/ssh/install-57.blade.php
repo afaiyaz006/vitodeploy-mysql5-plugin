@@ -1,92 +1,146 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Stop and purge any existing MySQL installation
+# Defensive purge of any prior native MySQL install on this host.
 sudo systemctl stop mysql 2>/dev/null || true
 sudo systemctl stop mysql.service 2>/dev/null || true
-
-sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y mysql-server mysql-server-* mysql-client mysql-common mysql-community-server 2>/dev/null || true
+sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y \
+    'mysql-server*' 'mysql-client*' 'mysql-community-*' 'mysql-common' 2>/dev/null || true
 sudo DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>/dev/null || true
-sudo DEBIAN_FRONTEND=noninteractive apt-get autoclean 2>/dev/null || true
+sudo rm -f /etc/apt/sources.list.d/mysql.list \
+           /etc/apt/preferences.d/mysql-5.7 \
+           /usr/share/keyrings/mysql-archive-keyring.gpg \
+           /etc/apt/trusted.gpg.d/mysql.gpg
 
-# Remove old repository and keys
-sudo rm -f /etc/apt/sources.list.d/mysql.list
-sudo rm -f /usr/share/keyrings/mysql-archive-keyring.gpg
-sudo rm -f /etc/apt/trusted.gpg.d/mysql.gpg
-
-sudo DEBIAN_FRONTEND=noninteractive apt-get update
-
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y wget lsb-release gnupg debconf-utils
-
-# Fetch the MySQL GPG key from keyserver and export to proper keyring location
-gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys B7B3B788A8D3785C 467B942D3A79BD29 A8D3785C
-gpg --export B7B3B788A8D3785C | sudo tee /usr/share/keyrings/mysql-archive-keyring.gpg > /dev/null
-
-# Detect Ubuntu codename. MySQL 5.7 is only officially packaged for bionic/focal.
-# For newer releases (jammy+), fall back to focal packages.
-CODENAME=$(lsb_release -sc)
-case "$CODENAME" in
-    bionic|focal)
-        REPO_CODENAME="$CODENAME"
-        ;;
-    *)
-        REPO_CODENAME="focal"
-        ;;
-esac
-
-# MySQL 5.7 links against libssl1.1, which was dropped from jammy+ main repos.
-# Pull the latest 1.1.1f-1ubuntu2.x build from focal-security when not already present.
-if ! dpkg -s libssl1.1 >/dev/null 2>&1; then
-    ARCH=$(dpkg --print-architecture)
-    LIBSSL_DEB="/tmp/libssl1.1.deb"
-    LIBSSL_INDEX="/tmp/libssl1.1.index.html"
-    LIBSSL_FILE=""
-    if wget -qO "$LIBSSL_INDEX" "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/"; then
-        LIBSSL_FILE=$(grep -oE "libssl1\.1_1\.1\.1f-1ubuntu2\.[0-9]+_${ARCH}\.deb" "$LIBSSL_INDEX" \
-            | sort -V | tail -n1)
+# Install Docker from Docker's official apt repo if it's not already present.
+if ! command -v docker >/dev/null 2>&1; then
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        ca-certificates curl gnupg lsb-release
+    sudo install -m 0755 -d /etc/apt/keyrings
+    if [ ! -s /etc/apt/keyrings/docker.gpg ]; then
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        sudo chmod a+r /etc/apt/keyrings/docker.gpg
     fi
-    rm -f "$LIBSSL_INDEX"
-    if [ -z "$LIBSSL_FILE" ]; then
-        LIBSSL_FILE="libssl1.1_1.1.1f-1ubuntu2.24_${ARCH}.deb"
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+        | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update
+    if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        docker-ce docker-ce-cli containerd.io; then
+        echo 'VITO_SSH_ERROR' && exit 1
     fi
-    sudo wget -qO "$LIBSSL_DEB" "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/${LIBSSL_FILE}"
-    sudo dpkg -i "$LIBSSL_DEB" || sudo DEBIAN_FRONTEND=noninteractive apt-get install -fy
-    sudo rm -f "$LIBSSL_DEB"
+fi
+sudo systemctl enable --now docker
+
+# Host-side mysql client. mariadb-client provides protocol-compatible
+# `mysql` and `mysqldump` binaries on jammy+, which is what every Vito
+# core database view shells out to.
+if ! command -v mysql >/dev/null 2>&1; then
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-client
 fi
 
-# Add MySQL 5.7 repository
-echo "deb [signed-by=/usr/share/keyrings/mysql-archive-keyring.gpg] http://repo.mysql.com/apt/ubuntu ${REPO_CODENAME} mysql-5.7" | sudo tee /etc/apt/sources.list.d/mysql.list
-echo "deb [signed-by=/usr/share/keyrings/mysql-archive-keyring.gpg] http://repo.mysql.com/apt/ubuntu ${REPO_CODENAME} mysql-apt-config" | sudo tee -a /etc/apt/sources.list.d/mysql.list
+# Persist a generated root password so re-running install doesn't break the
+# stored data dir's credentials. Owned by root, mode 0600.
+ROOT_PW_FILE=/root/.mysql5_root_pw
+if ! sudo test -s "$ROOT_PW_FILE"; then
+    sudo install -d -m 0700 /root
+    head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 24 \
+        | sudo tee "$ROOT_PW_FILE" >/dev/null
+    sudo chmod 0600 "$ROOT_PW_FILE"
+fi
+ROOT_PW=$(sudo cat "$ROOT_PW_FILE")
 
-# Pin MySQL 5.7 above 8.0 to ensure 5.7 packages are selected
-sudo tee /etc/apt/preferences.d/mysql-5.7 > /dev/null <<'EOF'
-Package: mysql-community-server mysql-community-client mysql-client mysql-server mysql-common libmysqlclient20
-Pin: version 5.7.*
-Pin-Priority: 1001
-EOF
+# Host directories: persistent data + shared socket directory.
+sudo mkdir -p /var/lib/mysql5-data /var/run/mysqld
+sudo chmod 0755 /var/run/mysqld
 
-sudo DEBIAN_FRONTEND=noninteractive apt-get update
-
-# Pre-seed an empty root password so the install doesn't prompt
-sudo debconf-set-selections <<'EOF'
-mysql-community-server mysql-community-server/root-pass password
-mysql-community-server mysql-community-server/re-root-pass password
-EOF
-
-sudo DEBIAN_FRONTEND=noninteractive \
-    apt-get -o Dpkg::Options::="--force-confdef" \
-            -o Dpkg::Options::="--force-confold" \
-    install -y mysql-community-server=5.7.* mysql-community-client=5.7.* mysql-client=5.7.* mysql-server=5.7.*
-
-sudo systemctl unmask mysql.service
-sudo systemctl enable mysql
-sudo systemctl start mysql
-
-# Switch root@localhost to auth_socket so subsequent `sudo mysql` commands work without password
-if ! sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;"; then
+# Pull image, recreate container. No port mapping, no network — only the
+# Unix socket bind-mounted to the host.
+sudo docker pull mysql:5.7
+sudo docker rm -f mysql5 2>/dev/null || true
+if ! sudo docker run -d \
+    --name mysql5 \
+    --restart unless-stopped \
+    --network none \
+    -e MYSQL_ROOT_PASSWORD="$ROOT_PW" \
+    -e MYSQL_ROOT_HOST=localhost \
+    -v /var/lib/mysql5-data:/var/lib/mysql \
+    -v /var/run/mysqld:/var/run/mysqld \
+    mysql:5.7 \
+    --socket=/var/run/mysqld/mysqld.sock \
+    --skip-networking=1; then
     echo 'VITO_SSH_ERROR' && exit 1
 fi
 
-if ! sudo mysql -e "FLUSH PRIVILEGES"; then
+# Wait until mysqld is actually ready before continuing.
+READY=0
+for i in $(seq 1 60); do
+    if sudo docker exec mysql5 mysqladmin ping -uroot -p"$ROOT_PW" --silent 2>/dev/null; then
+        READY=1
+        break
+    fi
+    sleep 2
+done
+if [ "$READY" -ne 1 ]; then
+    echo 'VITO_SSH_ERROR' && exit 1
+fi
+
+# Force native password auth on root@localhost so /root/.my.cnf creds work
+# regardless of what the entrypoint defaulted to.
+if ! sudo docker exec -i mysql5 mysql -uroot -p"$ROOT_PW" <<SQL
+ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${ROOT_PW}';
+FLUSH PRIVILEGES;
+SQL
+then
+    echo 'VITO_SSH_ERROR' && exit 1
+fi
+
+# /root/.my.cnf — host-side `sudo mysql` and `sudo mysqldump -u root` pick
+# this up automatically, which is how every Vito core database view works.
+sudo tee /root/.my.cnf >/dev/null <<EOF
+[client]
+user=root
+password=${ROOT_PW}
+socket=/var/run/mysqld/mysqld.sock
+
+[mysqldump]
+user=root
+password=${ROOT_PW}
+socket=/var/run/mysqld/mysqld.sock
+EOF
+sudo chmod 0600 /root/.my.cnf
+
+# systemd wrapper unit. Type=oneshot + RemainAfterExit=yes makes
+# `systemctl status mysql` print "Active: active (exited)", which still
+# satisfies Vito's Service::validateInstall substring check on
+# "Active: active". The actual mysqld lifetime is owned by Docker
+# (--restart unless-stopped); this unit just exposes start/stop hooks.
+sudo tee /etc/systemd/system/mysql.service >/dev/null <<'UNIT'
+[Unit]
+Description=MySQL 5.7 (Docker container wrapper)
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker start mysql5
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 60); do /usr/bin/docker exec mysql5 mysqladmin ping --silent && exit 0; sleep 2; done; exit 1'
+ExecStop=/usr/bin/docker stop mysql5
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+sudo systemctl daemon-reload
+sudo systemctl enable mysql.service
+sudo systemctl restart mysql.service
+
+# Smoke test from the host. This is the same shape every Vito core view
+# uses (`sudo mysql -e "..."`), so if it works here it works for create,
+# delete, link, unlink, backup, restore, list, etc.
+if ! sudo mysql -e "SELECT 1"; then
     echo 'VITO_SSH_ERROR' && exit 1
 fi

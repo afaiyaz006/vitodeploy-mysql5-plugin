@@ -19,12 +19,13 @@ class Mysql5 extends Mysql
     }
 
     /**
-     * Use plugin views for version-specific install scripts and reuse
-     * core MySQL views for everything else (SQL syntax is identical).
+     * Use plugin views for version-specific install scripts and the uninstall
+     * script, and reuse core MySQL views for everything else (SQL syntax is
+     * identical between 5.7 and 8.x for create/user/link/backup/restore ops).
      */
     protected function getScriptView(string $script): string
     {
-        if (str_starts_with($script, 'install-')) {
+        if (str_starts_with($script, 'install-') || $script === 'uninstall') {
             return 'mysql5::ssh.'.$script;
         }
 
