@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Vito\Plugins\Siteway\VitodeployMysql5Plugin;
+namespace App\Vito\Plugins\Afaiyaz006\VitodeployMysql5Plugin;
 
 use App\Plugins\AbstractPlugin;
 use App\Plugins\RegisterServiceType;
