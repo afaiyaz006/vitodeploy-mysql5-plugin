@@ -34,6 +34,26 @@ case "$CODENAME" in
         ;;
 esac
 
+# MySQL 5.7 links against libssl1.1, which was dropped from jammy+ main repos.
+# Pull the latest 1.1.1f-1ubuntu2.x build from focal-security when not already present.
+if ! dpkg -s libssl1.1 >/dev/null 2>&1; then
+    ARCH=$(dpkg --print-architecture)
+    LIBSSL_DEB="/tmp/libssl1.1.deb"
+    LIBSSL_INDEX="/tmp/libssl1.1.index.html"
+    LIBSSL_FILE=""
+    if wget -qO "$LIBSSL_INDEX" "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/"; then
+        LIBSSL_FILE=$(grep -oE "libssl1\.1_1\.1\.1f-1ubuntu2\.[0-9]+_${ARCH}\.deb" "$LIBSSL_INDEX" \
+            | sort -V | tail -n1)
+    fi
+    rm -f "$LIBSSL_INDEX"
+    if [ -z "$LIBSSL_FILE" ]; then
+        LIBSSL_FILE="libssl1.1_1.1.1f-1ubuntu2.24_${ARCH}.deb"
+    fi
+    sudo wget -qO "$LIBSSL_DEB" "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/${LIBSSL_FILE}"
+    sudo dpkg -i "$LIBSSL_DEB" || sudo DEBIAN_FRONTEND=noninteractive apt-get install -fy
+    sudo rm -f "$LIBSSL_DEB"
+fi
+
 # Add MySQL 5.7 repository
 echo "deb [signed-by=/usr/share/keyrings/mysql-archive-keyring.gpg] http://repo.mysql.com/apt/ubuntu ${REPO_CODENAME} mysql-5.7" | sudo tee /etc/apt/sources.list.d/mysql.list
 echo "deb [signed-by=/usr/share/keyrings/mysql-archive-keyring.gpg] http://repo.mysql.com/apt/ubuntu ${REPO_CODENAME} mysql-apt-config" | sudo tee -a /etc/apt/sources.list.d/mysql.list
