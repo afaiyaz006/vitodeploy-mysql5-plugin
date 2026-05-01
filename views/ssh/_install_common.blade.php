@@ -164,9 +164,22 @@ if [ "$READY" -ne 1 ]; then
     echo 'VITO_SSH_ERROR' && exit 1
 fi
 
-# Force native password auth on root@localhost so /root/.my.cnf creds work
-# regardless of what the entrypoint defaulted to. Safe to run because we just
-# proved the password is correct above.
+# Re-set the root password explicitly so /root/.my.cnf creds work regardless
+# of what the entrypoint defaulted to. SQL syntax differs by version:
+#   - 5.5/5.6: ALTER USER only supports PASSWORD EXPIRE — must use
+#     `SET PASSWORD ... = PASSWORD('...')` (and rely on the default
+#     mysql_native_password auth plugin, which is the only one loaded).
+#   - 5.7+: `ALTER USER ... IDENTIFIED WITH mysql_native_password BY '...'`
+#     is the idiomatic form and lets us pin the auth plugin explicitly.
+@if (in_array($version, ['5.5', '5.6']))
+if ! sudo docker exec -i mysql5 mysql -uroot -p"$ROOT_PW" <<SQL
+SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${ROOT_PW}');
+FLUSH PRIVILEGES;
+SQL
+then
+    echo 'VITO_SSH_ERROR' && exit 1
+fi
+@else
 if ! sudo docker exec -i mysql5 mysql -uroot -p"$ROOT_PW" <<SQL
 ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${ROOT_PW}';
 FLUSH PRIVILEGES;
@@ -174,6 +187,7 @@ SQL
 then
     echo 'VITO_SSH_ERROR' && exit 1
 fi
+@endif
 
 # /root/.my.cnf — host-side `sudo mysql` and `sudo mysqldump -u root` pick
 # this up automatically, which is how every Vito core database view works.
