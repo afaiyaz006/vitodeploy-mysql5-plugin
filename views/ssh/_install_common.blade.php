@@ -61,7 +61,15 @@ fi
 ROOT_PW=$(sudo cat "$ROOT_PW_FILE")
 
 # Host directories: persistent data + shared socket directory.
+# Pre-chown to UID 999 — the `mysql` user inside all official mysql:5.x
+# images. The mysql:5.7 entrypoint chowns these itself, but 5.5 and 5.6
+# don't, so without this mysqld dies on first start with
+# "[ERROR] Can't start server: Bind on unix socket: Permission denied".
+# Without docker userns-remap (the default), in-container UID 999 is
+# host UID 999, so this is the right owner from both views. Same security
+# model Vito's native MySQL install uses (specific UID owns data dir).
 sudo mkdir -p /var/lib/mysql5-data /var/run/mysqld
+sudo chown 999:999 /var/lib/mysql5-data /var/run/mysqld
 sudo chmod 0755 /var/run/mysqld
 
 # Preflight: refuse to proceed if the data dir was previously initialized by
