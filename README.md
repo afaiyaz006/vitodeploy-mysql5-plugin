@@ -4,9 +4,15 @@ Adds support for installing legacy MySQL 5.x versions in Vito Deploy by running 
 
 ## Supported versions
 
-- **MySQL 5.7** — runs the official `mysql:5.7` Docker image
+| Plugin version | Docker image | Notes |
+|---|---|---|
+| **MySQL 5.7** | `mysql:5.7` | EOL Oct 2023 |
+| **MySQL 5.6** | `mysql:5.6` | EOL Feb 2021. The image hasn't been rebuilt by Docker Hub since ~2018. |
+| **MySQL 5.5** | `mysql:5.5` | EOL Dec 2018. The image hasn't been rebuilt by Docker Hub since ~2018. |
 
-> MySQL 5.7 reached end-of-life in October 2023 and no longer receives security updates from Oracle. Use only for legacy applications that cannot be upgraded.
+> All three are EOL and **do not receive security patches** from Oracle. Use only for legacy applications that genuinely cannot be upgraded. The `--network none` / `--skip-networking` configuration drastically reduces the attack surface, but does not eliminate it. If your app can run on MySQL 8, use Vito's native MySQL 8 service instead.
+
+5.0 and 5.1 are not supported — Docker Hub's official `library/mysql` only goes back to 5.5. Earlier versions exist only as unmaintained third-party images.
 
 ## What it does
 
@@ -112,6 +118,26 @@ Edit `install-57.blade.php`: drop `--network none` and `--skip-networking=1`, th
 - The root password is generated at install time, persisted to `/root/.mysql5_root_pw` (mode 0600), and written to `/root/.my.cnf` (mode 0600). Same pattern Debian's stock MySQL packages use via `/etc/mysql/debian.cnf`.
 - Re-running install reuses the existing password file so the container's stored credentials and `/root/.my.cnf` stay in sync.
 - The container runs with `MYSQL_ROOT_HOST=localhost` (defense in depth on top of `--skip-networking`).
+
+### Keep Docker patched
+
+This plugin pulls Docker from the official apt repo (`download.docker.com/linux/ubuntu`), which means `docker-ce`, `docker-ce-cli`, and `containerd.io` are upgraded by apt like any other package. **Make sure they actually get upgraded** — runc/Docker daemon CVEs (e.g. Leaky Vessels, CVE-2026-34040) are real and apply to every container on the host, not just this one.
+
+Two ways to do it:
+
+- **Manual**: `sudo apt-get update && sudo apt-get upgrade` on a regular cadence.
+- **Automatic** (recommended): Ubuntu's `unattended-upgrades` only applies the `*-security` origin by default, which **does not include** the Docker repo. To enable auto-upgrades for Docker, add the Docker origin to `/etc/apt/apt.conf.d/50unattended-upgrades`:
+
+  ```
+  Unattended-Upgrade::Allowed-Origins {
+      "${distro_id}:${distro_codename}-security";
+      "Docker:${distro_codename}";
+  };
+  ```
+
+  Then `sudo systemctl restart unattended-upgrades`.
+
+The `mysql:5.7` image itself is **EOL and does not get patches** — that's a deliberate trade-off for running legacy MySQL at all. The `--network none` / `--skip-networking=1` configuration drastically limits what an attacker who already has SQL access can do, but does not eliminate it. Use this plugin only when the legacy app genuinely cannot run on MySQL 8.
 
 ## Installation
 

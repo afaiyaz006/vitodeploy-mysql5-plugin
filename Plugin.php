@@ -10,7 +10,7 @@ class Plugin extends AbstractPlugin
 {
     protected string $name = 'MySQL 5';
 
-    protected string $description = 'Adds support for installing legacy MySQL 5.x versions (5.7) via the MySQL APT repository.';
+    protected string $description = 'Adds support for installing legacy MySQL 5.x (5.5 / 5.6 / 5.7) as Docker containers, exposing the daemon only over a host-shared Unix socket.';
 
     public function boot(): void
     {
@@ -24,6 +24,8 @@ class Plugin extends AbstractPlugin
             ->handler(Mysql5::class)
             ->versions([
                 '5.7',
+                '5.6',
+                '5.5',
             ])
             ->register();
     }
