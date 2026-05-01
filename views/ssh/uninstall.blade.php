@@ -11,7 +11,7 @@ sudo systemctl daemon-reload
 # removing the container so we can drop whichever 5.x tag was actually used
 # (5.5 / 5.6 / 5.7) instead of hardcoding one.
 if command -v docker >/dev/null 2>&1; then
-    IMAGE=$(sudo docker inspect mysql5 --format '{{.Config.Image}}' 2>/dev/null || true)
+    IMAGE=$(sudo docker inspect mysql5 --format '@{{.Config.Image}}' 2>/dev/null || true)
     sudo docker rm -f mysql5 2>/dev/null || true
     if [ -n "$IMAGE" ]; then
         sudo docker image rm "$IMAGE" 2>/dev/null || true

@@ -64,6 +64,47 @@ ROOT_PW=$(sudo cat "$ROOT_PW_FILE")
 sudo mkdir -p /var/lib/mysql5-data /var/run/mysqld
 sudo chmod 0755 /var/run/mysqld
 
+# Preflight: refuse to proceed if the data dir was previously initialized by
+# a *different* MySQL major version. InnoDB's on-disk format isn't compatible
+# across 5.5 / 5.6 / 5.7 in either direction, so reusing the data dir would
+# crash mysqld with a checksum-mismatch error after the entrypoint correctly
+# decides to skip initialization (because /var/lib/mysql/mysql already
+# exists). The marker file is written at the end of a successful install,
+# so its presence confirms a clean prior install owns this data dir.
+TARGET_VERSION="{{ $version }}"
+VERSION_MARKER=/var/lib/mysql5-data/.mysql5-installed-version
+if sudo test -d /var/lib/mysql5-data/mysql; then
+    INSTALLED_VERSION=""
+    if sudo test -s "$VERSION_MARKER"; then
+        INSTALLED_VERSION=$(sudo cat "$VERSION_MARKER")
+    fi
+    if [ -z "$INSTALLED_VERSION" ]; then
+        echo "ERROR: /var/lib/mysql5-data already contains MySQL data, but no"
+        echo "version marker is present. This usually means a previous install"
+        echo "was not cleanly uninstalled (older plugin version, or interrupted"
+        echo "cleanup). Reusing this data dir would crash mysqld with an InnoDB"
+        echo "checksum error."
+        echo ""
+        echo "To recover, run on this host and then re-install via Vito:"
+        echo "  sudo docker rm -f mysql5 2>/dev/null"
+        echo "  sudo rm -rf /var/lib/mysql5-data /var/run/mysqld"
+        echo "  sudo rm -f /root/.my.cnf /root/.mysql5_root_pw"
+        echo 'VITO_SSH_ERROR' && exit 1
+    elif [ "$INSTALLED_VERSION" != "$TARGET_VERSION" ]; then
+        echo "ERROR: /var/lib/mysql5-data was initialized by MySQL"
+        echo "$INSTALLED_VERSION but you are installing $TARGET_VERSION."
+        echo "In-place version switching is not supported: InnoDB's on-disk"
+        echo "format differs between 5.5 / 5.6 / 5.7."
+        echo ""
+        echo "To switch versions, back up first, then on this host run:"
+        echo "  sudo docker rm -f mysql5 2>/dev/null"
+        echo "  sudo rm -rf /var/lib/mysql5-data /var/run/mysqld"
+        echo "  sudo rm -f /root/.my.cnf /root/.mysql5_root_pw"
+        echo "Then re-install at $TARGET_VERSION via Vito and restore your dump."
+        echo 'VITO_SSH_ERROR' && exit 1
+    fi
+fi
+
 # Pull image, recreate container. No port mapping, no network — only the
 # Unix socket bind-mounted to the host.
 sudo docker pull {{ $image }}
@@ -178,3 +219,9 @@ sudo systemctl restart mysql.service
 if ! sudo mysql -e "SELECT 1"; then
     echo 'VITO_SSH_ERROR' && exit 1
 fi
+
+# Stamp the data dir with the version we just installed. Subsequent installs
+# read this back to refuse incompatible cross-version installs (5.5 ↔ 5.6 ↔
+# 5.7) before they fail mid-flight with a confusing InnoDB checksum error.
+echo "{{ $version }}" | sudo tee /var/lib/mysql5-data/.mysql5-installed-version >/dev/null
+sudo chmod 0644 /var/lib/mysql5-data/.mysql5-installed-version
