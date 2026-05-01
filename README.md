@@ -12,7 +12,7 @@ Adds support for installing legacy MySQL 5.x versions in Vito Deploy by running 
 
 - Registers a new database service named **MySQL 5** (id: `mysql5`)
 - Installs Docker (from Docker's official apt repo) if not already present
-- Installs the host-side `mysql` / `mysqldump` binaries via `mariadb-client` (protocol-compatible with MySQL 5.7, packaged on jammy+)
+- Installs the host-side `mysql` / `mysqldump` binaries via `mysql-client-core-8.0` if no `mysql` binary is already in PATH (the 8.0 client is wire-protocol-compatible with a 5.7 server)
 - Pulls and runs `mysql:5.7` with **no exposed TCP port**: the container has `--network none` and `--skip-networking=1`, and the daemon's Unix socket is bind-mounted to `/var/run/mysqld/mysqld.sock` on the host
 - Writes `/root/.my.cnf` (mode 0600) so `sudo mysql` and `sudo mysqldump -u root` work on the host with no flags — this is what every Vito core database view shells out to
 - Registers a `mysql.service` systemd unit that wraps `docker start`/`docker stop` so `systemctl status mysql` reports the service active and Vito's install validation passes
@@ -48,7 +48,7 @@ Drop this directory into `storage/plugins/` and enable it via the Vito plugin ma
 
 ## Uninstall
 
-Removes the systemd unit, container, image, data dir (`/var/lib/mysql5-data`), socket dir (`/var/run/mysqld`), and the credential files. Deliberately does **not** uninstall Docker or `mariadb-client`, since other plugins or services on the host may depend on them.
+Removes the systemd unit, container, image, data dir (`/var/lib/mysql5-data`), socket dir (`/var/run/mysqld`), and the credential files. Deliberately does **not** uninstall Docker or the mysql client package, since other plugins or services on the host may depend on them.
 
 ## Notes
 
