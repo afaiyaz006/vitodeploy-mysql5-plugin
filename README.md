@@ -27,14 +27,85 @@ Once installed, the standard Vito **Database** tab manages this service exactly 
 - **Any Ubuntu where Docker runs** (jammy / noble / etc.). The libssl1.1 codename-remap dance the previous native install needed is gone.
 - The container ships amd64 and arm64v8 manifests, so both architectures work.
 
-## Networking and connecting from apps
+## How communication works (Unix socket, no TCP)
 
-The container has **no TCP port** of any kind. Apps on the same host must connect via the Unix socket:
+The container has **no TCP port** of any kind. Everything talks to mysqld through a single Unix socket file that is shared between host and container via a Docker bind-mount.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    Vito["Vito control server<br/>(Laravel app)"]
+    Vito -->|"SSH (phpseclib3)<br/>runs blade-rendered<br/>bash scripts"| Sudo
+
+    subgraph Host["Managed Ubuntu host"]
+        Sudo["sudo mysql -e '...'<br/>sudo mysqldump -u root &lt;db&gt;"]
+        Cnf[/"/root/.my.cnf  (mode 0600)<br/>user=root, password,<br/>socket=/var/run/mysqld/mysqld.sock<br/>+ column-statistics=0"/]
+        SockHost(("/var/run/mysqld/<br/>mysqld.sock"))
+        DataHost[("/var/lib/mysql5-data<br/>persistent data")]
+
+        Sudo -.->|reads creds<br/>+ socket path| Cnf
+        Sudo -->|Unix-domain<br/>socket connect| SockHost
+
+        subgraph Container["docker container 'mysql5' &nbsp; (--network none, --skip-networking=1)"]
+            Mysqld["mysqld 5.7<br/>uid=mysql"]
+            SockCtr(("/var/run/mysqld/<br/>mysqld.sock"))
+            DataCtr[("/var/lib/mysql")]
+            Mysqld --> SockCtr
+            Mysqld --> DataCtr
+        end
+
+        SockHost <-->|"bind-mount<br/>-v /var/run/mysqld:/var/run/mysqld<br/>(same inode on both sides)"| SockCtr
+        DataHost <-->|"bind-mount<br/>-v /var/lib/mysql5-data:/var/lib/mysql"| DataCtr
+    end
+
+    classDef noTcp fill:#fff,stroke:#c00,stroke-width:1px,stroke-dasharray: 4 2
+    class Container noTcp
+```
+
+### Call flow for a single Vito operation
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant V as Vito (Laravel)
+    participant H as Host: sudo mysql
+    participant F as /root/.my.cnf
+    participant S as Unix socket<br/>/var/run/mysqld/mysqld.sock
+    participant M as mysqld 5.7<br/>(in container)
+
+    V->>H: SSH exec: sudo mysql -e "CREATE DATABASE ..."
+    H->>F: read [client] section
+    F-->>H: user, password, socket path
+    H->>S: connect() on socket fd
+    Note over S: bind-mounted between host<br/>and container — same inode
+    S->>M: forward connection
+    M->>M: auth (mysql_native_password)
+    M->>M: execute SQL
+    M-->>S: result rows / OK packet
+    S-->>H: stream back
+    H-->>V: stdout over SSH session
+```
+
+What that means in practice:
+
+1. Vito SSHes into the managed host and runs `sudo mysql -e "<sql>"` (or `sudo mysqldump`). This is exactly what every Vito core database blade view does — none of them are aware the server is in a container.
+2. The mysql client process runs **on the host**, as root via sudo. It reads `/root/.my.cnf`, picks up the username, password, and `socket=` path.
+3. It opens a Unix-domain socket connection to `/var/run/mysqld/mysqld.sock` on the host filesystem.
+4. That socket file was created by **mysqld inside the container** because we bind-mounted the host directory `/var/run/mysqld` into the container at the same path. Both sides see the same inode; the kernel routes the connection across the namespace boundary.
+5. mysqld authenticates with `mysql_native_password` against the credentials baked into the data dir.
+6. Results stream back over the same socket → mysql client on the host → SSH session → Vito.
+
+### Connecting application code
+
+Apps on the same host must connect via the socket too:
 
 - **Laravel / PHP**: set `DB_HOST=localhost` and either `DB_SOCKET=/var/run/mysqld/mysqld.sock` or rely on the mysql client's "host=localhost ⇒ socket" convention.
 - **`DB_HOST=127.0.0.1` will not work** — there is no listener on TCP 3306.
 
-If you need TCP access, edit `install-57.blade.php` to drop `--network none` / `--skip-networking=1` and add `-p 127.0.0.1:3306:3306` — but the default deliberately rules out any network surface.
+### If you need TCP access anyway
+
+Edit `install-57.blade.php`: drop `--network none` and `--skip-networking=1`, then add `-p 127.0.0.1:3306:3306` to the `docker run` command. The default deliberately rules out any network surface, but the socket-based UI integration keeps working unchanged either way.
 
 ## Security notes
 
