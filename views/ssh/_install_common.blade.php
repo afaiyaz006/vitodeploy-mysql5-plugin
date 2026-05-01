@@ -81,7 +81,9 @@ sudo chmod 0755 /var/run/mysqld
 # so its presence confirms a clean prior install owns this data dir.
 TARGET_VERSION="{{ $version }}"
 VERSION_MARKER=/var/lib/mysql5-data/.mysql5-installed-version
+DATA_DIR_PRE_EXISTED=0
 if sudo test -d /var/lib/mysql5-data/mysql; then
+    DATA_DIR_PRE_EXISTED=1
     INSTALLED_VERSION=""
     if sudo test -s "$VERSION_MARKER"; then
         INSTALLED_VERSION=$(sudo cat "$VERSION_MARKER")
@@ -134,29 +136,34 @@ fi
 # Wait until mysqld is actually ready AND auth works. Note: `mysqladmin ping`
 # returns success even on access-denied (it only checks server liveness), so
 # we use a real authenticated SELECT here instead.
+#
+# The fast-fail "stored password mismatches data dir" guard only runs when
+# the data dir was already populated *before* this install (i.e. we're
+# re-using an existing data dir). On a fresh install, the entrypoint runs
+# its multi-second init phase during which a temp mysqld is up on the same
+# socket but root has no password yet — auth-with-$ROOT_PW failing during
+# that window is normal, not a stale-data problem. Without this gate, the
+# guard fires falsely on every fresh install.
 READY=0
 for i in $(seq 1 90); do
     if sudo docker exec mysql5 mysql -uroot -p"$ROOT_PW" -e "SELECT 1" >/dev/null 2>&1; then
         READY=1
         break
     fi
-    # If the server is up but auth fails, the data dir was previously
-    # initialized with a different password — bail out fast with guidance
-    # rather than waiting the full 90 iterations.
-    if sudo docker exec mysql5 mysqladmin ping --silent >/dev/null 2>&1; then
-        if [ "$i" -ge 5 ]; then
-            echo "ERROR: mysql container is up but the stored root password in"
-            echo "/root/.mysql5_root_pw does not match the password baked into the"
-            echo "existing data dir at /var/lib/mysql5-data. The {{ $image }} entrypoint"
-            echo "skips initialization (and ignores MYSQL_ROOT_PASSWORD) when the data"
-            echo "dir already contains a 'mysql/' subdirectory."
-            echo ""
-            echo "To recover, run on this host and then re-install via Vito:"
-            echo "  sudo docker rm -f mysql5"
-            echo "  sudo rm -rf /var/lib/mysql5-data"
-            echo "  sudo rm -f /root/.mysql5_root_pw /root/.my.cnf"
-            echo 'VITO_SSH_ERROR' && exit 1
-        fi
+    if [ "$DATA_DIR_PRE_EXISTED" -eq 1 ] \
+        && sudo docker exec mysql5 mysqladmin ping --silent >/dev/null 2>&1 \
+        && [ "$i" -ge 5 ]; then
+        echo "ERROR: mysql container is up but the stored root password in"
+        echo "/root/.mysql5_root_pw does not match the password baked into the"
+        echo "existing data dir at /var/lib/mysql5-data. The {{ $image }} entrypoint"
+        echo "skips initialization (and ignores MYSQL_ROOT_PASSWORD) when the data"
+        echo "dir already contains a 'mysql/' subdirectory."
+        echo ""
+        echo "To recover, run on this host and then re-install via Vito:"
+        echo "  sudo docker rm -f mysql5"
+        echo "  sudo rm -rf /var/lib/mysql5-data"
+        echo "  sudo rm -f /root/.mysql5_root_pw /root/.my.cnf"
+        echo 'VITO_SSH_ERROR' && exit 1
     fi
     sleep 2
 done
