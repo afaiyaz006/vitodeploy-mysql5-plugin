@@ -72,17 +72,10 @@ sudo mkdir -p /var/lib/mysql5-data /var/run/mysqld
 sudo chown 999:999 /var/lib/mysql5-data /var/run/mysqld
 sudo chmod 0755 /var/run/mysqld
 
-# /var/run is on tmpfs and gets wiped on every reboot, taking /var/run/mysqld
-# with it. Without this tmpfiles.d entry, after reboot Docker (--restart
-# unless-stopped) auto-recreates the missing bind-mount source as root:root,
-# which the in-container mysql user can't write to → mysqld crash-loops and
-# the socket file never appears. systemd-tmpfiles-setup runs at
-# sysinit.target, well before docker.service, so the directory is in place
-# with the right owner by the time the container comes back up.
-sudo tee /etc/tmpfiles.d/mysql5.conf >/dev/null <<'TMP'
-d /var/run/mysqld 0755 999 999 -
-TMP
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/mysql5.conf
+# Clean up any tmpfiles.d entry from earlier plugin versions — we now
+# handle the boot-time socket-dir recreation via the systemd unit's
+# ExecStartPre hooks below, which is more reliable.
+sudo rm -f /etc/tmpfiles.d/mysql5.conf
 
 # Preflight: refuse to proceed if the data dir was previously initialized by
 # a *different* MySQL major version. InnoDB's on-disk format isn't compatible
@@ -131,9 +124,13 @@ fi
 # Unix socket bind-mounted to the host.
 sudo docker pull {{ $image }}
 sudo docker rm -f mysql5 2>/dev/null || true
+# --restart=no on purpose: systemd owns the lifecycle (see ExecStartPre on
+# mysql.service below). If we left Docker auto-restart on, after a reboot
+# Docker would race ahead of systemd, recreate /var/run/mysqld as root:root
+# (the bind-mount default), and mysqld would crash-loop on the socket bind.
 if ! sudo docker run -d \
     --name mysql5 \
-    --restart unless-stopped \
+    --restart=no \
     --network none \
     -e MYSQL_ROOT_PASSWORD="$ROOT_PW" \
     -e MYSQL_ROOT_HOST=localhost \
@@ -230,8 +227,15 @@ sudo chmod 0600 /root/.my.cnf
 # systemd wrapper unit. Type=oneshot + RemainAfterExit=yes makes
 # `systemctl status mysql` print "Active: active (exited)", which still
 # satisfies Vito's Service::validateInstall substring check on
-# "Active: active". The actual mysqld lifetime is owned by Docker
-# (--restart unless-stopped); this unit just exposes start/stop hooks.
+# "Active: active".
+#
+# systemd owns the entire lifecycle (Docker's --restart=no, set on the
+# container above). The two ExecStartPre hooks ensure /var/run/mysqld
+# exists with the right owner *before* `docker start` runs, which is
+# essential after every reboot because /var/run is tmpfs and gets wiped.
+# Without these, mysqld inside the container would hit
+# "[ERROR] Can't start server: Bind on unix socket: Permission denied"
+# on the first boot after install.
 sudo tee /etc/systemd/system/mysql.service >/dev/null <<'UNIT'
 [Unit]
 Description=MySQL {{ $version }} (Docker container wrapper)
@@ -241,6 +245,9 @@ After=docker.service network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=/bin/mkdir -p /var/run/mysqld
+ExecStartPre=/bin/chown 999:999 /var/run/mysqld
+ExecStartPre=/bin/chmod 0755 /var/run/mysqld
 ExecStart=/usr/bin/docker start mysql5
 ExecStartPost=/bin/sh -c 'for i in $(seq 1 60); do /usr/bin/docker exec mysql5 mysqladmin ping --silent && exit 0; sleep 2; done; exit 1'
 ExecStop=/usr/bin/docker stop mysql5

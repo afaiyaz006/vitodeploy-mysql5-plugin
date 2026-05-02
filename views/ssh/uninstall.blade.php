@@ -18,8 +18,9 @@ if command -v docker >/dev/null 2>&1; then
     fi
 fi
 
-# Wipe data, socket, credential files, and the tmpfiles.d entry that
-# recreates the socket dir at boot.
+# Wipe data, socket, credential files, and any tmpfiles.d entry left over
+# from earlier plugin versions (current plugin handles this via systemd
+# unit ExecStartPre hooks instead).
 sudo rm -f /etc/tmpfiles.d/mysql5.conf
 sudo rm -rf /var/lib/mysql5-data
 sudo rm -rf /var/run/mysqld
