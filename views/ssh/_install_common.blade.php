@@ -72,6 +72,18 @@ sudo mkdir -p /var/lib/mysql5-data /var/run/mysqld
 sudo chown 999:999 /var/lib/mysql5-data /var/run/mysqld
 sudo chmod 0755 /var/run/mysqld
 
+# /var/run is on tmpfs and gets wiped on every reboot, taking /var/run/mysqld
+# with it. Without this tmpfiles.d entry, after reboot Docker (--restart
+# unless-stopped) auto-recreates the missing bind-mount source as root:root,
+# which the in-container mysql user can't write to → mysqld crash-loops and
+# the socket file never appears. systemd-tmpfiles-setup runs at
+# sysinit.target, well before docker.service, so the directory is in place
+# with the right owner by the time the container comes back up.
+sudo tee /etc/tmpfiles.d/mysql5.conf >/dev/null <<'TMP'
+d /var/run/mysqld 0755 999 999 -
+TMP
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/mysql5.conf
+
 # Preflight: refuse to proceed if the data dir was previously initialized by
 # a *different* MySQL major version. InnoDB's on-disk format isn't compatible
 # across 5.5 / 5.6 / 5.7 in either direction, so reusing the data dir would

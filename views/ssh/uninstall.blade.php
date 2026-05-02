@@ -18,7 +18,9 @@ if command -v docker >/dev/null 2>&1; then
     fi
 fi
 
-# Wipe data, socket, and credential files.
+# Wipe data, socket, credential files, and the tmpfiles.d entry that
+# recreates the socket dir at boot.
+sudo rm -f /etc/tmpfiles.d/mysql5.conf
 sudo rm -rf /var/lib/mysql5-data
 sudo rm -rf /var/run/mysqld
 sudo rm -f /root/.my.cnf
