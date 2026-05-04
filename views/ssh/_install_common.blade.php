@@ -120,8 +120,12 @@ if sudo test -d /var/lib/mysql5-data/mysql; then
     fi
 fi
 
-# Pull image, recreate container. No port mapping, no network — only the
-# Unix socket bind-mounted to the host.
+# Pull image, recreate container. Unix socket bind-mounted to the host plus
+# loopback-only TCP via --network host + --bind-address=127.0.0.1. Sharing
+# the host netns (rather than -p 127.0.0.1:3306:3306 through the docker
+# bridge) keeps existing 'user'@'localhost' grants working over TCP, since
+# mysqld sees loopback connections as 127.0.0.1 instead of the bridge
+# gateway IP.
 sudo docker pull {{ $image }}
 sudo docker rm -f mysql5 2>/dev/null || true
 # --restart=no on purpose: systemd owns the lifecycle (see ExecStartPre on
@@ -131,14 +135,14 @@ sudo docker rm -f mysql5 2>/dev/null || true
 if ! sudo docker run -d \
     --name mysql5 \
     --restart=no \
-    --network none \
+    --network host \
     -e MYSQL_ROOT_PASSWORD="$ROOT_PW" \
     -e MYSQL_ROOT_HOST=localhost \
     -v /var/lib/mysql5-data:/var/lib/mysql \
     -v /var/run/mysqld:/var/run/mysqld \
     {{ $image }} \
     --socket=/var/run/mysqld/mysqld.sock \
-    --skip-networking; then
+    --bind-address=127.0.0.1; then
     echo 'VITO_SSH_ERROR' && exit 1
 fi
 
