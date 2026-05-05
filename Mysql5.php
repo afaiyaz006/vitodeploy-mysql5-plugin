@@ -41,15 +41,30 @@ class Mysql5 extends Mysql
     }
 
     /**
-     * Use plugin views for version-specific install scripts and the uninstall
-     * script, and reuse core MySQL views for everything else (SQL syntax is
-     * identical between 5.7 and 8.x for create/user/link/backup/restore ops).
+     * Use plugin views for the install / uninstall scripts and for every
+     * user-management op (create / update / delete / link / unlink). Reuse
+     * core MySQL views for everything else — list, backup, restore, charsets
+     * — where the SQL is identical and there's no plugin-specific behavior.
      *
-     * MySQL 5.5 and 5.6 lack several syntax additions made in 5.7
-     * (CREATE USER IF NOT EXISTS — 5.7.6, DROP USER IF EXISTS — 5.7.8,
-     * ALTER USER ... IDENTIFIED BY — 5.7.6). Override those user-management
-     * views with pre-5.7 equivalents (GRANT USAGE / DELETE-from-mysql.user
-     * / SET PASSWORD).
+     * Two reasons the user-management views diverge from core:
+     *
+     * 1. SQL dialect. MySQL 5.5/5.6 lack `CREATE USER IF NOT EXISTS` (5.7.6),
+     *    `DROP USER IF EXISTS` (5.7.8), and `ALTER USER ... IDENTIFIED BY`
+     *    (5.7.6). The plugin views use pre-5.7-compatible idioms
+     *    (`GRANT USAGE`, mysql.user pre-check + `DROP USER`, `SET PASSWORD
+     *    = PASSWORD()`), with runtime version detection where 5.7's syntax
+     *    diverges from 5.5/5.6.
+     *
+     * 2. Dual-host grants. This plugin installs mysqld with
+     *    `--bind-address=127.0.0.1` and `--network host`, so TCP listens on
+     *    loopback only. MySQL's `'user'@'localhost'` matches *only* socket
+     *    connections (mysqld special-cases the literal string "localhost"),
+     *    so an app connecting via `-h 127.0.0.1` against a `'@localhost'`
+     *    grant gets `ERROR 1130: Host '127.0.0.1' is not allowed`. The
+     *    plugin views always create both `'@localhost'` and `'@127.0.0.1'`
+     *    rows per Vito user (plus the user-supplied host if remote), and
+     *    update/delete/link/unlink discover all matching hosts at SQL
+     *    runtime and apply the operation to each row.
      */
     protected function getScriptView(string $script): string
     {
@@ -57,10 +72,7 @@ class Mysql5 extends Mysql
             return 'mysql5::ssh.'.$script;
         }
 
-        if (
-            in_array($this->service->version, ['5.5', '5.6'], true)
-            && in_array($script, ['create-user', 'delete-user', 'update-user'], true)
-        ) {
+        if (in_array($script, ['create-user', 'update-user', 'delete-user', 'link', 'unlink'], true)) {
             return 'mysql5::ssh.legacy.'.$script;
         }
 
